@@ -1,0 +1,32 @@
+
+Wayward Queen:
+- You: e4
+- Opponent: e5
+- You: Queen h5
+- Opponent: knight c6, if pawn g6 then u play e5 and take his pawn
+- You: Bishop c4 ----> Queen f7 ----> checkmate
+
+
+
+Caro Kann Trap (lining ur queen to the opponent king):
+- You: pawn e4
+- Opponent: pawn c6
+- You: Knight c3
+- Opponent: pawn d5
+- You: Queen e2
+- Opponent: capture pawn e4
+- You: Knight captures pawn e4 ---> bring the knight to d6 to checkmate
+
+Ponziani Trap:
+
+
+Fried Liver Trap:
+- You: e4
+- Opponent: e5
+- You: Bishop c4 
+- Point: Opponents block queen, develop knight to g5 targeting the weak square f7
+
+
+English
+
+
