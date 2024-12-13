@@ -1,0 +1,97 @@
+# =========================
+# .NET / Visual Studio
+# =========================
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# =========================
+# Build outputs
+# =========================
+[Bb]uild/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+artifacts/
+
+# =========================
+# Rider / VS Code
+# =========================
+.idea/
+.vscode/
+
+# =========================
+# NuGet
+# =========================
+*.nupkg
+*.snupkg
+packages/
+.nuget/
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+
+# =========================
+# Docker
+# =========================
+**/docker-compose.override.yml
+**/docker-compose.*.yml
+
+# =========================
+# Environment / Secrets
+# =========================
+.env
+.env.*
+secrets.json
+
+# =========================
+# SQLite / local data
+# =========================
+*.db
+*.db-shm
+*.db-wal
+/data/
+Auth.txt
+auth.txt
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Temporary files
+# =========================
+*.tmp
+*.temp
+*.bak
+*.swp
+*.pid
+
+# =========================
+# Coverage / Testing
+# =========================
+coverage/
+TestResults/
+*.trx
+
+# =========================
+# Publish output
+# =========================
+publish/
+
+# =========================
+# User-specific configs
+# =========================
+appsettings.Development.json
+appsettings.Local.json
