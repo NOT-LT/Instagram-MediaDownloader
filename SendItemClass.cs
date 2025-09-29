@@ -16,7 +16,7 @@ namespace IGMediaDownloaderV2
             var EntityName = $"{new Random().Next(999999999)}_0_{new Random().Next(899999999)}";
             byte[] imageArray = System.IO.File.ReadAllBytes($"{MediaName}");
             RestRequest Request = new RestRequest($"https://rupload.facebook.com/messenger_image/{EntityName}");
-            Request.AddHeader("User-Agent", "Instagram 265.0.0.19.301 Android");
+            Request.AddHeader("User-Agent", Program.IgUserAgent);
             //Request.AddHeader("X-Ig-App-Id", "567067343352427");
             //Request.AddHeader("X-Mid", "XOkgFgAAAAFYtHhheQRQBAhzSnhS");
             //Request.AddHeader("Ig-U-Ds-User-Id", new Random().Next(999999999));
@@ -36,7 +36,7 @@ namespace IGMediaDownloaderV2
         {
             var ClientContext = Convert.ToString(new Random().Next(999999999));
             var Request = new RestRequest("https://i.instagram.com/api/v1/direct_v2/threads/broadcast/photo_attachment/");
-            Request.AddHeader("User-Agent", "Instagram 265.0.0.19.301 Android");
+            Request.AddHeader("User-Agent", Program.IgUserAgent);
             //Request.AddHeader("X-Ig-App-Id", "567067343352427");
             //Request.AddHeader("X-Mid", "XOkgFgAAAAFYtHhheQRQBAhzSnhS");
             //Request.AddHeader("Ig-U-Ds-User-Id", new Random().Next(999999999));
@@ -58,7 +58,7 @@ namespace IGMediaDownloaderV2
             byte[] VidArray = System.IO.File.ReadAllBytes($"{MediaName}");
             var EntityName = $"{new Random().Next(999999999)}-0-{VidArray.Length}-lessO-{new Random().Next(899999999)}";
             RestRequest Request = new RestRequest($"https://rupload.facebook.com/messenger_video/{EntityName}");
-            Request.AddHeader("User-Agent", "Instagram 265.0.0.19.301 Android");
+            Request.AddHeader("User-Agent", Program.IgUserAgent);
             Request.AddHeader("X-Ig-App-Id", "567067343352427");
             Request.AddHeader("Content-Type", "application/octet-stream");
             Request.AddHeader("X-Entity-Name", EntityName);
@@ -78,7 +78,7 @@ namespace IGMediaDownloaderV2
         {
             var ClientContext = Convert.ToString(new Random().Next(999999999));
             var Request = new RestRequest("https://i.instagram.com/api/v1/direct_v2/threads/broadcast/video_attachment/");
-            Request.AddHeader("User-Agent", "Instagram 265.0.0.19.301 Android");
+            Request.AddHeader("User-Agent", Program.IgUserAgent);
             //Request.AddHeader("X-Ig-App-Id", "567067343352427");
             //Request.AddHeader("X-Mid", "XOkgFgAAAAFYtHhheQRQBAhzSnhS");
             //Request.AddHeader("Ig-U-Ds-User-Id", new Random().Next(999999999));
@@ -91,6 +91,28 @@ namespace IGMediaDownloaderV2
                 return true;
             else
                 return false;
+        }
+
+        public static async Task<bool> SendText(string userId, string username, string threadId, string clientText)
+        {
+            string myText = $"Hi {username}! 👋\n\n" +
+                            "I can help you save Instagram content 📥\n" +
+                            "Just send me a post, reel, or story, and I’ll re-send it back to you so you can save it easily ✨\n\n" +
+                            "Developed by Taha Aljamri (@zdlk) 🤖";
+
+            var clientContext = Convert.ToString(Random.Shared.Next(999999999));
+            var request = new RestRequest("https://i.instagram.com/api/v1/direct_v2/threads/broadcast/text/");
+            request.AddHeader("User-Agent", Program.IgUserAgent);
+            request.AddHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+
+            request.AddStringBody(
+                $"recipient_users=[[{userId}]]&mentioned_user_ids=[]&client_context={clientContext}&_csrftoken=DlpXaOHu2hO61YBpZ4QxKxWYKXpk5BFN&text={myText}&device_id=android_1c1487babcadb5fd&mutation_token={clientContext}&offline_threading_id={clientContext}",
+                DataFormat.None);
+
+            RestResponse httpResponse = await Program.IGRestClient.ExecutePostAsync(request);
+            var json = httpResponse.Content ?? "";
+
+            return json.Contains(@"""status"":""ok""");
         }
 
     }

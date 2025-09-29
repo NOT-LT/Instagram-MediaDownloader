@@ -9,7 +9,7 @@ using Newtonsoft.Json.Linq;
 using System.Text.RegularExpressions;
 using System.Reflection;
 using RestSharp;
-
+using DotNetEnv;
 namespace IGMediaDownloaderV2
 {
 
@@ -18,23 +18,36 @@ namespace IGMediaDownloaderV2
         internal static MessageStore Store = new MessageStore("processed_messages.db");
         public static RestClient IGRestClient = new RestClient("https://i.instagram.com/");
         public static RestClient FBRestClient = new RestClient("https://rupload.facebook.com/");
-        public static string Username = "", Password = "", Authorization = "";
-        public static int GoodReqs = 0, BadReqs = 0;
+        public static string Username = "", Password = "", Authorization = "", SessionId = "";
+        public static int GoodReqs = 0, BadReqs = 0, ProcessedMsgs = 0;
         public static List<string> Timestamps = new List<string>();
+        public const string IgUserAgent = "Instagram 361.0.0.46.88 Android (31/12; 640dpi; 1644x3840; 674675155)";
+        public const string IgAppId = "567067343352427";
 
         static void Main(string[] args)
         {
             try
             {
+                DotNetEnv.Env.Load();
                 var filePath = Environment.GetEnvironmentVariable("AUTH_STORE_PATH") ?? "Auth.txt";
-                if (File.Exists(filePath))
+                var filePath2 = Environment.GetEnvironmentVariable("SESSION_STORE_PATH") ?? "Session.txt";
+
+                if (File.Exists(filePath) && File.Exists(filePath2))
                 {
-                    Program.Authorization = File.ReadAllText(filePath); //Do not delete the Auth text file
+                    Program.Authorization = File.ReadAllText(filePath); // Read saved Authorization token
+                    Program.SessionId = File.ReadAllText(filePath2); // // Read saved SessionId
                 }
-                //Timestamps = File.ReadAllLines("Timestamps.txt").ToList(); //Do not delete the Timestamps text file
             }
-            catch (Exception)
-            { Environment.Exit(0); }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("Failed to load environment variables or authorization file.");
+                Console.WriteLine($"Error: {ex.Message}");
+                Console.ResetColor();
+
+                Console.WriteLine();
+                Environment.Exit(1);
+            }
 
             MainAsync().GetAwaiter().GetResult();
             Console.ReadLine();
@@ -42,25 +55,28 @@ namespace IGMediaDownloaderV2
 
         public static async Task MainAsync()
         {
-        Starting:
-            //Console.Clear();
             Console.ForegroundColor = ConsoleColor.Green;
-            if (Program.Authorization.Length < 10 || await LoginClass.IsValidAuthToken(Program.Authorization) == false)
+            if (Program.Authorization.Length < 10 || Program.SessionId.Length < 10 || await LoginClass.IsValidTokens(Program.Authorization, Program.SessionId) == false)
             {
                 //Console.Write("[+] Enter username: ");
-                //Username = Console.ReadLine();
+                //Username = Console.ReadLine() ?? "";
                 //Console.Write("[+] Enter password: ");
-                //Password = Console.ReadLine();
+                //Password = Console.ReadLine() ?? "";
                 Username = Environment.GetEnvironmentVariable("USERNAME") ?? "";
                 Password = Environment.GetEnvironmentVariable("PASSWORD") ?? "";
                 if (!await LoginClass.Login(Username, Password))
-                    Environment.Exit(-1);
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("Login Failed");
+                    Console.ResetColor();
 
-            }
+                    Console.WriteLine();
+                    Environment.Exit(1);
+                }
+            }            
             Console.WriteLine("[+] Logged In Successfully ! ");
             IGRestClient.AddDefaultHeader("Authorization", Authorization);
             FBRestClient.AddDefaultHeader("Authorization", Authorization);
-
             var DMReqsThrd = new Thread(DMReqs) { Priority = ThreadPriority.AboveNormal };
             DMReqsThrd.Start();
             var CounterThrd = new Thread(Counter) { Priority = ThreadPriority.AboveNormal };
@@ -117,6 +133,7 @@ namespace IGMediaDownloaderV2
                 {
 
                     DMReqsResponse = await DMClass.CheckDMReqAPI(Authorization);
+                    
                     if (DMReqsResponse.Contains(@"""status"":""ok"""))
                     {
                         Console.WriteLine($"[{Program.GoodReqs}] Direct messages reqs was checked at {DateTime.Now.ToString("hh:mm:ss")}");
@@ -154,8 +171,7 @@ namespace IGMediaDownloaderV2
             {
                 try
                 {
-                    Console.Title = $"Good Requests: {GoodReqs}  || Bad Requests: {BadReqs}";
-
+                    Console.Title = $"Good Requests: {GoodReqs}  || Bad Requests: {BadReqs} || Processed Msgs: {ProcessedMsgs}";
                 }
                 catch { }
                 Thread.Sleep(500);
