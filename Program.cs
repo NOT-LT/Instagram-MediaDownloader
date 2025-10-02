@@ -172,6 +172,10 @@ namespace IGMediaDownloaderV2
                 try
                 {
                     Console.Title = $"Good Requests: {GoodReqs}  || Bad Requests: {BadReqs} || Processed Msgs: {ProcessedMsgs}";
+                    if (ProcessedMsgs >= 100)
+                    {
+                        Store.DeleteUntilCutoff();
+                    }
                 }
                 catch { }
                 Thread.Sleep(500);
