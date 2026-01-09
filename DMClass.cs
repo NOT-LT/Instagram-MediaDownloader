@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using Sprache;
+using System.Linq.Expressions;
 
 namespace IGMediaDownloaderV2
 {
@@ -78,6 +79,8 @@ namespace IGMediaDownloaderV2
             if (jsonObject["new_stories"] != null) allStories.AddRange(jsonObject["new_stories"]);
             if (jsonObject["old_stories"] != null) allStories.AddRange(jsonObject["old_stories"]);
 
+            var tasks = new List<Task>();
+
             foreach (var story in allStories)
             {
                 string notifName = story["notif_name"]?.ToString();
@@ -91,87 +94,54 @@ namespace IGMediaDownloaderV2
                     // 1. Time Cutoff Check
                     if (storyTimestamp < xMinutesAgo) break;
 
-                    string username = args["profile_name"]?.ToString() ?? "unknown";
-                    string userId = args["profile_id"]?.ToString() ?? "";
-                    string mediaId = args["media"]?[0]?["id"]?.ToString() ?? "";
-
-                    // Use a unique ID for this notification to prevent double-processing
-                    // 'M_' prefix helps distinguish it from DM item IDs
-                    string mentionNotificationId = $"M_{mediaId}_{storyTimestamp}";
-
-                    // 2. Duplicate Check
-                    if (Program.Store.Exists(mentionNotificationId)) continue;
-
-                    Logger.Info($"[FRESH MENTION] {storyTimestamp}, Media ID: {mediaId}");
-
-                    // 3. Thread ID Resolution
-                    // Note: If this is the first time they tag you, threadId might be empty
-                    var threadId = Program.Store.GetReceiverId(userId) ?? "";
-                    Logger.Info($"ThreadId: " + threadId);
-
-                    if (string.IsNullOrEmpty(threadId))
+                    tasks.Add(Task.Run(async () =>
                     {
-                        Logger.Warn($"No thread found for {username}. Ensure DM runs first");
-                        continue;
-                    }
-                    Logger.Info($"[FRESH MENTION] HERE");
+                        await _threadSemaphore.WaitAsync();
 
-                    int media_type = await DownloadClass.Get_media_type_by_id(mediaId);
-                    var ctx = new MediaContext();
-                    Logger.Info($"[FRESH MENTION] {media_type} | {media_type.GetType()}");
-
-                    if (media_type == 1) // PHOTO
-                    {
-                        ctx.MediaUrl = await DownloadClass.Get_xma_image_download_link_by_id(mediaId);
-                        if (string.IsNullOrWhiteSpace(ctx.MediaUrl)) continue;
-
-                        ctx.MediaName = $"img_{Guid.NewGuid():N}.png";
-
-                        await _downloadSemaphore.WaitAsync();
                         try
                         {
-                            if (await DownloadClass.DownloadMedia(ctx.MediaUrl, ctx.MediaName))
+                            string username = args["profile_name"]?.ToString() ?? "";
+                            string userId = args["profile_id"]?.ToString() ?? "";
+
+                            string mediaId = args["media"]?[0]?["id"]?.ToString() ?? "";
+
+                            // 'M_' prefix is used distinguish it from DM item IDs
+                            string mentionNotificationId = $"M_{mediaId}_{storyTimestamp}";
+
+                            // 2. Duplicate Check
+                            if (Program.Store.Exists(mentionNotificationId)) return;
+
+                            Logger.Info($"[FRESH MENTION] from @{username}, Media ID: {mediaId}, UserId: {userId}");
+
+                            // 3. Thread ID Resolution
+                            // Note: If this is the first time they tag you, threadId might be empty
+                            var threadId = Program.Store.GetThreadId(userId) ?? "";
+
+                            if (string.IsNullOrEmpty(threadId))
                             {
-                                ctx.FBPhotoID = await SendItemClass.UploadImage(ctx.MediaName);
-                                await SendItemClass.SendImage(ctx.FBPhotoID, threadId);
-                                // Mark as processed only after successful send
+                                Logger.Warn($"No thread found for {username}. Ensure DM runs first");
+                                return;
+                            }
+
+                            if (await PipelineMediaById(mediaId, threadId))
+                            {
                                 Program.Store.UpsertMessage(mentionNotificationId, threadId, storyTimestamp, MessageStatus.Processed);
-                                Logger.Success($"Sent photo to @{username}");
+                                Logger.Success($"Sent a media to @{username}");
                             }
                         }
                         finally
                         {
-                            _downloadSemaphore.Release();
-                            SafeDelete(ctx.MediaName);
+                            _threadSemaphore.Release();
                         }
-                    }
-                    else if (media_type == 2) // VIDEO
-                    {
-                        Logger.Info($"[VIDEO]");
-                        ctx.MediaUrl = await DownloadClass.Get_xma_video_download_link_by_id(mediaId);
-                        if (string.IsNullOrWhiteSpace(ctx.MediaUrl)) continue;
-
-                        ctx.MediaName = $"vid_{Guid.NewGuid():N}.mp4";
-
-                        await _downloadSemaphore.WaitAsync();
-                        try
-                        {
-                            if (await DownloadClass.DownloadMedia(ctx.MediaUrl, ctx.MediaName))
-                            {
-                                ctx.FBVidID = await SendItemClass.UploadVideo(ctx.MediaName);
-                                await SendItemClass.SendVideo(ctx.FBVidID, threadId);
-                                Program.Store.UpsertMessage(mentionNotificationId, threadId, storyTimestamp, MessageStatus.Processed);
-                                Logger.Success($"Sent video to @{username}");
-                            }
-                        }
-                        finally
-                        {
-                            _downloadSemaphore.Release();
-                            SafeDelete(ctx.MediaName);
-                        }
-                    }
+                    }));
                 }
             }
+
+            if (tasks.Any())
+            {
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+            }
+
             return "";
         }
 
@@ -205,7 +175,7 @@ namespace IGMediaDownloaderV2
                 var inviter = thread["inviter"];
                 if (inviter == null) continue;
 
-                var userId = inviter["pk"]?.ToString() ?? "";
+                var userId = inviter["id"]?.ToString() ?? "";
                 var username = inviter["username"]?.ToString() ?? "";
                 var threadId = thread["thread_id"]?.ToString() ?? "";
                 var items = thread["items"] as JArray;
@@ -229,9 +199,15 @@ namespace IGMediaDownloaderV2
                             }
 
                             if (await SendItemClass.SendText(userId, username, threadId, responseMsg))
-                                Logger.Success($"Accepted @{username}", indent: 1);
+                            {
+                                Program.Store.RegisterThread(threadId, userId);
+                                Logger.Success($"Accepted @{username} with id ${userId} and threadId of ${threadId}", indent: 1);
+                            }
                             else
-                                Logger.Warn($"Ignored @{username}", indent: 1);
+                            {
+                                Logger.Error($"Could not send the activation message for @{username}", indent: 1);
+                            }
+
                         }
                         catch (Exception ex)
                         {
@@ -253,25 +229,7 @@ namespace IGMediaDownloaderV2
                 var threads = jsonObject.SelectToken("inbox")?["threads"] as JArray;
                 if (threads == null) return;
 
-                // 1. Collect mappings first (Synchronously - very fast)
-                var threadsToRegister = new List<(string, string)>();
-                foreach (var t in threads)
-                {
-                    var threadId = t["thread_id"]?.ToString();
-                    // Note: Instagram usually uses 'pk' or 'id' for the user ID
-                    var userId = t["inviter"]?["pk"]?.ToString() ?? t["inviter"]?["id"]?.ToString();
-
-                    if (!string.IsNullOrEmpty(threadId) && !string.IsNullOrEmpty(userId))
-                    {
-                        threadsToRegister.Add((threadId, userId));
-                    }
-                }
-
-                // 2. Register them in the DB immediately (uses your fast HashSet cache)
-                // This ensures GetThreadId(userId) will work for the ActivityFeed right away.
-                Program.Store.EnsureThreadsExist(threadsToRegister);
-
-                // 3. Now process the messages in the threads
+                // process the messages in the threads
                 var threadTasks = threads
                     .Where(t => t["inviter"] != null)
                     .Select(async thread =>
@@ -427,12 +385,13 @@ namespace IGMediaDownloaderV2
                         Logger.Success($"Processed: {messageId}", indent: 2);
                         break;
 
-                    case "generic_xma":
-                        Logger.Info($"generic_xma: {messageId}", indent: 1);
-                        await HandleGenericXma(item, username, threadId);
-                        Program.Store.UpsertMessage(messageId, threadId, ts, MessageStatus.Processed);
-                        Logger.Success($"Processed: {messageId}", indent: 2);
-                        break;
+                    // Was used to handle mentions, currently disabled since mentions are handled via Activity Feed API for accuracy, but can be re-enabled if needed
+                    //case "generic_xma":
+                    //    Logger.Info($"generic_xma: {messageId}", indent: 1);
+                    //    await HandleGenericXma(item, username, threadId);
+                    //    Program.Store.UpsertMessage(messageId, threadId, ts, MessageStatus.Processed);
+                    //    Logger.Success($"Processed: {messageId}", indent: 2);
+                    //    break;
 
                     case "media_share":
                         Logger.Info($"media_share: {messageId}", indent: 1);
@@ -698,65 +657,14 @@ namespace IGMediaDownloaderV2
             var xma = item["xma_media_share"] as JArray;
             if (xma == null || xma.Count == 0) return;
 
-            string TargetUrl = Regex.Unescape(xma[0]["target_url"]?.ToString()) ?? "";
-            var media_type = await DownloadClass.Get_media_type(TargetUrl);
-            if (media_type == 1)
+            var mediaId = item["original_media_igid"].ToString() ?? "";
+            if (await PipelineMediaById(mediaId, threadId))
             {
-                ctx.MediaUrl = xma[0]?["preview_url"]?.ToString() ?? "";
-                ctx.MediaName = $"img_{Guid.NewGuid():N}.png";
-
-                await _downloadSemaphore.WaitAsync();
-                try
-                {
-                    if (await DownloadClass.DownloadMedia(ctx.MediaUrl, ctx.MediaName))
-                        Logger.Success($"Downloaded xma media for @{username}", indent: 2);
-                    else
-                        Logger.Warn($"Failed xma media download for @{username}", indent: 2);
-                }
-                finally
-                {
-                    _downloadSemaphore.Release();
-                }
-
-                ctx.FBPhotoID = await SendItemClass.UploadImage(ctx.MediaName);
-
-                if (await SendItemClass.SendImage(ctx.FBPhotoID, threadId))
-                    Logger.Success($"Sent xma media to @{username}", indent: 2);
-                else
-                    Logger.Warn($"Failed to send xma media to @{username}", indent: 2);
-            }
-            else if (media_type == 2)
+                Logger.Success($"Sent an XMA Media Share to @{username}", indent: 2);
+            } else
             {
-                ctx.MediaUrl = await DownloadClass.Get_xma_video_download_link(TargetUrl);
-                if (String.IsNullOrWhiteSpace(ctx.MediaUrl))
-                {
-                    Logger.Warn($"Failed to get XMA Media Share (video) download link for @{username}", indent: 2);
-                    return;
-                }
-                ctx.MediaName = $"vid_{Guid.NewGuid():N}.mp4";
-
-                await _downloadSemaphore.WaitAsync();
-                try
-                {
-                    if (await DownloadClass.DownloadMedia(ctx.MediaUrl, ctx.MediaName))
-                        Logger.Success($"Downloaded XMA Media Share (video) for @{username}", indent: 2);
-                    else
-                        Logger.Warn($"Failed XMA Media Share (video) download for @{username}", indent: 2);
-                }
-                finally
-                {
-                    _downloadSemaphore.Release();
-                }
-
-                ctx.FBVidID = await SendItemClass.UploadVideo(ctx.MediaName);
-
-                if (await SendItemClass.SendVideo(ctx.FBVidID, threadId))
-                    Logger.Success($"Sent XMA Media Share (video) to @{username}", indent: 2);
-                else
-                    Logger.Warn($"Failed to send XMA Media Share (video) to @{username}", indent: 2);
+                Logger.Error($"Failed on processing an XMA Media Share for @{username}", indent: 2);
             }
-
-            SafeDelete(ctx.MediaName);
         }
 
         private static async Task HandleXmaStoryShare(JToken item, string username, string threadId)
@@ -877,6 +785,7 @@ namespace IGMediaDownloaderV2
             }
         }
 
+        // HandleGenericXma() method is deprecated and currently not used since mentions are now handled via Activity Feed API for better accuracy, but the method is left here in case we want to handle other generic_xma types in the future or if we want to revert mentions back to being handled via DM API
         private static async Task HandleGenericXma(JToken item, string username, string threadId)
         {
             var ctx = new MediaContext();
@@ -997,6 +906,58 @@ namespace IGMediaDownloaderV2
                 Logger.Warn($"Failed to send clip to @{username}", indent: 2);
 
             SafeDelete(ctx.MediaName);
+        }
+
+
+        private static async Task<bool> PipelineMediaById(string mediaId, string threadId)
+        {
+            // 1. Determine what we are dealing with first
+            int mediaType = await DownloadClass.Get_media_type_by_id(mediaId);
+            var ctx = new MediaContext();
+
+            // 2. Setup Type-Specific Metadata
+            if (mediaType == 1) // PHOTO
+            {
+                ctx.MediaUrl = await DownloadClass.Get_xma_image_download_link_by_id(mediaId);
+                ctx.MediaName = $"img_{Guid.NewGuid():N}.png";
+            }
+            else if (mediaType == 2) // VIDEO
+            {
+                ctx.MediaUrl = await DownloadClass.Get_xma_video_download_link_by_id(mediaId);
+                ctx.MediaName = $"vid_{Guid.NewGuid():N}.mp4";
+            }
+            else { return false; } // Unknown type
+
+            if (string.IsNullOrWhiteSpace(ctx.MediaUrl)) return false;
+
+            // 3. Shared Physical Operation (Download -> Upload -> Send)
+            await _downloadSemaphore.WaitAsync();
+            try
+            {
+                if (!await DownloadClass.DownloadMedia(ctx.MediaUrl, ctx.MediaName))
+                    return false;
+
+                if (mediaType == 1) // PHOTO Logic
+                {
+                    ctx.FBPhotoID = await SendItemClass.UploadImage(ctx.MediaName);
+                    return await SendItemClass.SendImage(ctx.FBPhotoID, threadId);
+                }
+                else // VIDEO Logic
+                {
+                    ctx.FBVidID = await SendItemClass.UploadVideo(ctx.MediaName);
+                    return await SendItemClass.SendVideo(ctx.FBVidID, threadId);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"HandleMediaOperation_ByMediaId error: {ex.Message}", indent: 2);
+                return false;
+            }
+            finally
+            {
+                _downloadSemaphore.Release();
+                SafeDelete(ctx.MediaName);
+            }
         }
 
         private static void SafeDelete(string path)

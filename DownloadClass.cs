@@ -117,10 +117,7 @@ namespace IGMediaDownloaderV2
             try
             {
                 var json = await Get_media_info(media_id);
-                Console.WriteLine($"Raw JSON for media_id {media_id}: {json.Substring(0, Math.Min(500, json.Length))}..."); // Log the first 500 chars of JSON for debugging
                 var cleanUrl = ExtractVideoUrlFromJson(json);
-
-
 
                 return cleanUrl;
             }
