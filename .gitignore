@@ -1,0 +1,65 @@
+# =====================
+# Build results
+# =====================
+bin/
+obj/
+
+# =====================
+# .NET Core / SDK
+# =====================
+*.dll
+*.exe
+*.pdb
+*.cache
+*.deps.json
+*.runtimeconfig.json
+
+# =====================
+# User-specific files
+# =====================
+*.user
+*.rsuser
+*.suo
+*.userosscache
+*.sln.docstates
+
+# =====================
+# Visual Studio
+# =====================
+.vs/
+.vscode/
+
+# =====================
+# Rider / JetBrains
+# =====================
+.idea/
+*.sln.iml
+
+# =====================
+# OS files
+# =====================
+.DS_Store
+Thumbs.db
+
+# =====================
+# Logs
+# =====================
+*.log
+
+# =====================
+# NuGet
+# =====================
+packages/
+.nuget/
+
+# =====================
+# Test results
+# =====================
+TestResults/
+
+# =====================
+# Environment / secrets
+# =====================
+.env
+appsettings.Development.json
+appsettings.Local.json
