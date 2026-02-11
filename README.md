@@ -1,3 +1,11 @@
+<<<<<<< HEAD
+# Instagram-MediaDownloader
+An Instagram chat bot that enables users to download posts (photos/videos) and stories effortlessly via Instagram Direct Messages
+
+## How to use:
+<p>Send any photo/video to the bot, and it will send it back to you to download it in you device</p>
+<img src="bot.gif" alt="Watch the gif" width="215" height="410">
+=======
 # Instagram-MediaDownloader
 An Instagram chat bot that enables users to download posts (photos/videos) and stories effortlessly via Instagram Direct Messages
 
@@ -67,3 +75,4 @@ docker run -d \
 ## 7) 📄 License
 
 This project is licensed under MIT license.
+>>>>>>> 5cb43e34737c1e4e3fff495858434cfe92b14bb3
