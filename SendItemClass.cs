@@ -93,20 +93,15 @@ namespace IGMediaDownloaderV2
                 return false;
         }
 
-        public static async Task<bool> SendText(string userId, string username, string threadId, string clientText)
+        public static async Task<bool> SendText(string userId, string username, string threadId, string MsgText)
         {
-            string myText = $"Hi {username}! 👋\n\n" +
-                            "I can help you save Instagram content 📥\n" +
-                            "Just send me a post, reel, or story, and I’ll re-send it back to you so you can save it easily ✨\n\n" +
-                            "Developed by Taha Aljamri (@zdlk) 🤖";
-
             var clientContext = Convert.ToString(Random.Shared.Next(999999999));
             var request = new RestRequest("https://i.instagram.com/api/v1/direct_v2/threads/broadcast/text/");
             request.AddHeader("User-Agent", Program.IgUserAgent);
             request.AddHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
 
             request.AddStringBody(
-                $"recipient_users=[[{userId}]]&mentioned_user_ids=[]&client_context={clientContext}&_csrftoken=DlpXaOHu2hO61YBpZ4QxKxWYKXpk5BFN&text={myText}&device_id=android_1c1487babcadb5fd&mutation_token={clientContext}&offline_threading_id={clientContext}",
+                $"recipient_users=[[{userId}]]&mentioned_user_ids=[]&client_context={clientContext}&_csrftoken=DlpXaOHu2hO61YBpZ4QxKxWYKXpk5BFN&text={MsgText}&device_id=android_1c1487babcadb5fd&mutation_token={clientContext}&offline_threading_id={clientContext}",
                 DataFormat.None);
 
             RestResponse httpResponse = await Program.IGRestClient.ExecutePostAsync(request);

@@ -56,29 +56,6 @@ namespace IGMediaDownloaderV2
                 return "";
         } // Can handle xma_media_share (videos only) and xma_clip
 
-
-        public static async Task<bool> SendText(string userId, string username, string threadId, string clientText)
-        {
-            string myText = $"Hi {username}! 👋\n\n" +
-                            "I can help you save Instagram content 📥\n" +
-                            "Just send me a post, reel, or story, and I’ll re-send it back to you so you can save it easily ✨\n\n" +
-                            "Developed by Taha Aljamri (@zdlk) 🤖";
-
-            var clientContext = Convert.ToString(Random.Shared.Next(999999999));
-            var request = new RestRequest("https://i.instagram.com/api/v1/direct_v2/threads/broadcast/text/");
-            request.AddHeader("User-Agent", Program.IgUserAgent);
-            request.AddHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
-
-            request.AddStringBody(
-                $"recipient_users=[[{userId}]]&mentioned_user_ids=[]&client_context={clientContext}&_csrftoken=DlpXaOHu2hO61YBpZ4QxKxWYKXpk5BFN&text={myText}&device_id=android_1c1487babcadb5fd&mutation_token={clientContext}&offline_threading_id={clientContext}",
-                DataFormat.None);
-
-            RestResponse httpResponse = await Program.IGRestClient.ExecutePostAsync(request);
-            var json = httpResponse.Content ?? "";
-
-            return json.Contains(@"""status"":""ok""");
-        }
-
         public static async Task<(Int16 MediaType, string MediaUrl)> Get_story_download_link(string owner_user_id, string reel_id) // Returns [media_type, url] where media_type is 1 for image and 2 for video
         {
             string payload = $"signed_body=SIGNATURE.{{\"exclude_media_ids\":\"[]\",\"supported_capabilities_new\":\"[{{\\\"name\\\":\\\"SUPPORTED_SDK_VERSIONS\\\",\\\"value\\\":\\\"149.0,150.0,151.0,152.0,153.0,154.0,155.0,156.0,157.0,158.0,159.0,160.0,161.0,162.0,163.0,164.0,165.0,166.0,167.0,168.0,169.0,170.0,171.0,172.0,173.0,174.0,175.0,176.0,177.0,178.0,179.0,180.0,181.0,182.0,183.0,184.0,185.0,186.0,187.0,188.0,189.0,190.0,191.0\\\"}},{{\\\"name\\\":\\\"SUPPORTED_BETA_SDK_VERSIONS\\\",\\\"value\\\":\\\"189.0-beta,190.0-beta,191.0-beta\\\"}},{{\\\"name\\\":\\\"FACE_TRACKER_VERSION\\\",\\\"value\\\":\\\"14\\\"}},{{\\\"name\\\":\\\"segmentation\\\",\\\"value\\\":\\\"segmentation_enabled\\\"}},{{\\\"name\\\":\\\"COMPRESSION\\\",\\\"value\\\":\\\"ETC2_COMPRESSION\\\"}},{{\\\"name\\\":\\\"world_tracker\\\",\\\"value\\\":\\\"world_tracker_enabled\\\"}},{{\\\"name\\\":\\\"gyroscope\\\",\\\"value\\\":\\\"gyroscope_enabled\\\"}}]\",\"reason\":\"on_tap\",\"media_id\":\"{reel_id}_{owner_user_id}\",\"source\":\"\",\"batch_size\":\"1\",\"_uid\":\"\",\"_uuid\":\"891cbf09-1663-4a98-8008-5e758f84c853\",\"reel_ids\":[\"{owner_user_id}\"]}}";

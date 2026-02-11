@@ -23,9 +23,15 @@ namespace IGMediaDownloaderV2
         public static List<string> Timestamps = new List<string>();
         public const string IgUserAgent = "Instagram 361.0.0.46.88 Android (31/12; 640dpi; 1644x3840; 674675155)";
         public const string IgAppId = "567067343352427";
+        
+        // App startup timestamp in microseconds (Instagram format)
+        public static long AppStartupTimestamp { get; private set; }
 
         static void Main(string[] args)
         {
+            // Capture app startup timestamp immediately (in microseconds)
+            AppStartupTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
+            
             try
             {
                 DotNetEnv.Env.Load();
@@ -35,17 +41,13 @@ namespace IGMediaDownloaderV2
                 if (File.Exists(filePath) && File.Exists(filePath2))
                 {
                     Program.Authorization = File.ReadAllText(filePath); // Read saved Authorization token
-                    Program.SessionId = File.ReadAllText(filePath2); // // Read saved SessionId
+                    Program.SessionId = File.ReadAllText(filePath2); // Read saved SessionId
                 }
             }
             catch (Exception ex)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("Failed to load environment variables or authorization file.");
-                Console.WriteLine($"Error: {ex.Message}");
-                Console.ResetColor();
-
-                Console.WriteLine();
+                Logger.Error("Failed to load environment variables or authorization file.");
+                Logger.Error($"Error: {ex.Message}");
                 Environment.Exit(1);
             }
 
@@ -55,26 +57,20 @@ namespace IGMediaDownloaderV2
 
         public static async Task MainAsync()
         {
-            Console.ForegroundColor = ConsoleColor.Green;
             if (Program.Authorization.Length < 10 || Program.SessionId.Length < 10 || await LoginClass.IsValidTokens(Program.Authorization, Program.SessionId) == false)
             {
-                //Console.Write("[+] Enter username: ");
-                //Username = Console.ReadLine() ?? "";
-                //Console.Write("[+] Enter password: ");
-                //Password = Console.ReadLine() ?? "";
                 Username = Environment.GetEnvironmentVariable("USERNAME") ?? "";
                 Password = Environment.GetEnvironmentVariable("PASSWORD") ?? "";
                 if (!await LoginClass.Login(Username, Password))
                 {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine("Login Failed");
-                    Console.ResetColor();
-
-                    Console.WriteLine();
+                    Logger.Error("Login Failed");
                     Environment.Exit(1);
                 }
             }            
-            Console.WriteLine("[+] Logged In Successfully ! ");
+            Logger.Success("Logged In Successfully!");
+            Logger.Info($"App started at {DateTimeOffset.FromUnixTimeMilliseconds(AppStartupTimestamp / 1000).ToString("yyyy-MM-dd HH:mm:ss")} UTC");
+            Logger.Info($"Ignoring all messages before startup timestamp: {AppStartupTimestamp}");
+            
             IGRestClient.AddDefaultHeader("Authorization", Authorization);
             FBRestClient.AddDefaultHeader("Authorization", Authorization);
             var DMReqsThrd = new Thread(DMReqs) { Priority = ThreadPriority.AboveNormal };
@@ -91,13 +87,13 @@ namespace IGMediaDownloaderV2
                     DMResponse = await DMClass.CheckDMAPI(Authorization);
                     if (DMResponse.Contains(@"""status"":""ok"""))
                     {
-                        Console.WriteLine($"[{Program.GoodReqs}] Direct messages was checked at {DateTime.Now.ToString("hh:mm:ss")}");
+                        Logger.Info($"[{Program.GoodReqs}] Direct messages checked at {DateTime.Now.ToString("HH:mm:ss")}");
                         GoodReqs++;
                         await DMClass.DMResponseProcess(DMResponse);
                     }
                     else
                     {
-                        Console.WriteLine($"[!] Direct messages cannot be checked at {DateTime.Now.ToString("hh:mm:ss")}");
+                        Logger.Warn($"Direct messages check failed at {DateTime.Now.ToString("HH:mm:ss")}");
                         BadReqs++;
                         int FAILdelayMs = int.TryParse(
                                                         Environment.GetEnvironmentVariable("FAIL_POLL_MSGS_DELAY_MS"),
@@ -136,13 +132,13 @@ namespace IGMediaDownloaderV2
                     
                     if (DMReqsResponse.Contains(@"""status"":""ok"""))
                     {
-                        Console.WriteLine($"[{Program.GoodReqs}] Direct messages reqs was checked at {DateTime.Now.ToString("hh:mm:ss")}");
+                        Logger.Info($"[{Program.GoodReqs}] Direct message requests checked at {DateTime.Now.ToString("HH:mm:ss")}");
                         GoodReqs++;
                         await DMClass.DMReqResponseProcess(DMReqsResponse);
                     }
                     else
                     {
-                        Console.WriteLine($"[!] Direct messages reqs cannot be checked at {DateTime.Now.ToString("hh:mm:ss")}");
+                        Logger.Warn($"Direct message requests check failed at {DateTime.Now.ToString("HH:mm:ss")}");
                         BadReqs++;
                         int FAILdelayMs = int.TryParse(
                                                        Environment.GetEnvironmentVariable("FAIL_POLL_REQS_DELAY_MS"),
