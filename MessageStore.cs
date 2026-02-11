@@ -144,5 +144,26 @@ ON CONFLICT(MessageId) DO UPDATE SET
 
             cmd.ExecuteNonQuery();
         }
+
+        public int DeleteUntilCutoff()
+        {
+            using var con = new SqliteConnection(_connectionString);
+            con.Open();
+
+            using var cmd = con.CreateCommand();
+            cmd.CommandText = @"
+DELETE FROM Messages
+WHERE MessageId IN (
+    SELECT m.MessageId
+    FROM Messages m
+    JOIN ThreadState t
+        ON m.ThreadId = t.ThreadId
+    WHERE m.Timestamp < t.CutoffTimestamp
+);
+";
+
+            return cmd.ExecuteNonQuery(); // returns number of deleted rows
+        }
+
     }
 }
