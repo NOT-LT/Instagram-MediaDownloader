@@ -23,6 +23,13 @@ namespace IGMediaDownloaderV2
         public static List<string> Timestamps = new List<string>();
         public const string IgUserAgent = "Instagram 361.0.0.46.88 Android (31/12; 640dpi; 1644x3840; 674675155)";
         public const string IgAppId = "567067343352427";
+        public static readonly long PollMentionDelayMS =
+               long.TryParse(
+                   Environment.GetEnvironmentVariable("POLL_MENTIONS_DELAY_MS"),
+                   out var v
+               )
+               ? v
+               : 300000; // Fallback to 5 minutes
         
         // App startup timestamp in microseconds (Instagram format)
         public static long AppStartupTimestamp { get; private set; }
@@ -73,8 +80,10 @@ namespace IGMediaDownloaderV2
             
             IGRestClient.AddDefaultHeader("Authorization", Authorization);
             FBRestClient.AddDefaultHeader("Authorization", Authorization);
-            var DMReqsThrd = new Thread(DMReqs) { Priority = ThreadPriority.AboveNormal };
-            DMReqsThrd.Start();
+
+
+            //var DMReqsThrd = new Thread(DMReqs) { Priority = ThreadPriority.AboveNormal };
+            //DMReqsThrd.Start();
             var CounterThrd = new Thread(Counter) { Priority = ThreadPriority.AboveNormal };
             CounterThrd.Start();
 
@@ -101,11 +110,36 @@ namespace IGMediaDownloaderV2
                                                         ? failValue
                                                         : 180_000; // default 180 seconds
 
-                        Thread.Sleep(FAILdelayMs);
                     }
 
                 }
                 catch { }
+
+                //try
+                //{
+                //    string JSONResponse = await DMClass.CheckActivityFeedAPI();
+                //    if (JSONResponse.Contains(@"""status"":""ok"""))
+                //    {
+                //        Logger.Info($"[{Program.GoodReqs}] Activity Feeds (mentions) checked at {DateTime.Now.ToString("HH:mm:ss")}");
+                //        GoodReqs++;
+                //        await DMClass.ActivityFeedProcess(JSONResponse);
+                //    }
+                //    else
+                //    {
+                //        Logger.Warn($" Activity Feeds (mentions) check failed at {DateTime.Now.ToString("HH:mm:ss")}");
+                //        BadReqs++;
+                //        int FAILdelayMs = int.TryParse(
+                //                                        Environment.GetEnvironmentVariable("FAIL_POLL_MSGS_DELAY_MS"),
+                //                                        out var failValue)
+                //                                        ? failValue
+                //                                        : 180_000; // default 180 seconds
+
+                //        Thread.Sleep(FAILdelayMs);
+                //    }
+
+                //}
+                //catch { }
+
 
                 int delayMs = int.TryParse(
                                             Environment.GetEnvironmentVariable("POLL_MSGS_DELAY_MS"),
@@ -168,7 +202,7 @@ namespace IGMediaDownloaderV2
                 try
                 {
                     Console.Title = $"Good Requests: {GoodReqs}  || Bad Requests: {BadReqs} || Processed Msgs: {ProcessedMsgs}";
-                    if (ProcessedMsgs >= 100)
+                    if (ProcessedMsgs % 100 == 0) // Every 100 processed messages
                     {
                         Store.DeleteUntilCutoff();
                     }

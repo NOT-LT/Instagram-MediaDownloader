@@ -9,71 +9,27 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using Sprache;
 
 namespace IGMediaDownloaderV2
 {
-    internal static class Logger
-    {
-        private static readonly object _lock = new object();
-
-        private enum Level { Debug, Info, Success, Warn, Error }
-
-        public static void Debug(string message, int indent = 0) => Write(Level.Debug, message, indent);
-        public static void Info(string message, int indent = 0) => Write(Level.Info, message, indent);
-        public static void Success(string message, int indent = 0) => Write(Level.Success, message, indent);
-        public static void Warn(string message, int indent = 0) => Write(Level.Warn, message, indent);
-        public static void Error(string message, int indent = 0) => Write(Level.Error, message, indent);
-
-        private static void Write(Level level, string message, int indent)
-        {
-            indent = Math.Max(0, indent);
-            string pad = new string(' ', indent * 2);
-
-            string ts = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
-            string prefix = level.ToString().ToUpperInvariant();
-
-            lock (_lock)
-            {
-                var old = Console.ForegroundColor;
-
-                Console.ForegroundColor = level switch
-                {
-                    Level.Debug => ConsoleColor.DarkGray,
-                    Level.Info => ConsoleColor.Cyan,
-                    Level.Success => ConsoleColor.Green,
-                    Level.Warn => ConsoleColor.Yellow,
-                    Level.Error => ConsoleColor.Red,
-                    _ => ConsoleColor.White
-                };
-
-                string line = $"[{ts}Z] [{prefix}] {pad}{message}";
-
-                // Docker captures stdout/stderr automatically
-                if (level == Level.Warn || level == Level.Error)
-                    Console.Error.WriteLine(line);
-                else
-                    Console.Out.WriteLine(line);
-
-                Console.ForegroundColor = old;
-            }
-        }
-    }
 
     internal class DMClass
     {
         // Concurrency controls
         private static readonly SemaphoreSlim _threadSemaphore = new SemaphoreSlim(
-            int.TryParse(Environment.GetEnvironmentVariable("MAX_CONCURRENT_THREADS"), out var maxThreads) 
+            int.TryParse(Environment.GetEnvironmentVariable("MAX_CONCURRENT_THREADS"), out var maxThreads)
                 ? maxThreads : 5
         );
 
         private static readonly SemaphoreSlim _messageSemaphore = new SemaphoreSlim(
-            int.TryParse(Environment.GetEnvironmentVariable("MAX_CONCURRENT_MESSAGES"), out var maxMsgs) 
+            int.TryParse(Environment.GetEnvironmentVariable("MAX_CONCURRENT_MESSAGES"), out var maxMsgs)
                 ? maxMsgs : 10
         );
 
         private static readonly SemaphoreSlim _downloadSemaphore = new SemaphoreSlim(
-            int.TryParse(Environment.GetEnvironmentVariable("MAX_CONCURRENT_DOWNLOADS"), out var maxDownloads) 
+            int.TryParse(Environment.GetEnvironmentVariable("MAX_CONCURRENT_DOWNLOADS"), out var maxDownloads)
                 ? maxDownloads : 20
         );
 
@@ -98,6 +54,125 @@ namespace IGMediaDownloaderV2
 
             RestResponse httpResponse = await Program.IGRestClient.ExecuteAsync(request);
             return httpResponse.Content ?? string.Empty;
+        }
+
+        public static async Task<string> CheckActivityFeedAPI() // For mentions
+        {
+            var request = new RestRequest("/api/v1/news/inbox/?could_truncate_feed=true&should_skip_su=true&mark_as_seen=false&timezone_offset=28800&timezone_name=Asia%2FShanghai", Method.Get);
+            request.AddHeader("User-Agent", Program.IgUserAgent);
+            request.AddHeader("X-Ig-App-Id", Program.IgAppId);
+            request.AddHeader("X-Mid", "aYuA4gABAAFoIhgQirMYy3a98zul");
+            request.AddHeader("Ig-U-Ds-User-Id", Random.Shared.Next(999_999_999));
+            RestResponse httpResponse = await Program.IGRestClient.ExecuteAsync(request);
+            return httpResponse.Content ?? string.Empty;
+        }
+
+        public static async Task<string> ActivityFeedProcess(string JSONResponse)
+        {
+            if (string.IsNullOrEmpty(JSONResponse)) return "No response from API";
+
+            var jsonObject = JObject.Parse(JSONResponse);
+            long xMinutesAgo = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - (Program.PollMentionDelayMS / 1000);
+
+            var allStories = new List<JToken>();
+            if (jsonObject["new_stories"] != null) allStories.AddRange(jsonObject["new_stories"]);
+            if (jsonObject["old_stories"] != null) allStories.AddRange(jsonObject["old_stories"]);
+
+            foreach (var story in allStories)
+            {
+                string notifName = story["notif_name"]?.ToString();
+                var args = story["args"];
+
+                if (notifName == "mentioned_comment" && args != null)
+                {
+                    double rawTs = args["timestamp"]?.Value<double>() ?? 0;
+                    long storyTimestamp = (long)rawTs;
+
+                    // 1. Time Cutoff Check
+                    if (storyTimestamp < xMinutesAgo) break;
+
+                    string username = args["profile_name"]?.ToString() ?? "unknown";
+                    string userId = args["profile_id"]?.ToString() ?? "";
+                    string mediaId = args["media"]?[0]?["id"]?.ToString() ?? "";
+
+                    // Use a unique ID for this notification to prevent double-processing
+                    // 'M_' prefix helps distinguish it from DM item IDs
+                    string mentionNotificationId = $"M_{mediaId}_{storyTimestamp}";
+
+                    // 2. Duplicate Check
+                    if (Program.Store.Exists(mentionNotificationId)) continue;
+
+                    Logger.Info($"[FRESH MENTION] {storyTimestamp}, Media ID: {mediaId}");
+
+                    // 3. Thread ID Resolution
+                    // Note: If this is the first time they tag you, threadId might be empty
+                    var threadId = Program.Store.GetReceiverId(userId) ?? "";
+                    Logger.Info($"ThreadId: " + threadId);
+
+                    if (string.IsNullOrEmpty(threadId))
+                    {
+                        Logger.Warn($"No thread found for {username}. Ensure DM runs first");
+                        continue;
+                    }
+                    Logger.Info($"[FRESH MENTION] HERE");
+
+                    int media_type = await DownloadClass.Get_media_type_by_id(mediaId);
+                    var ctx = new MediaContext();
+                    Logger.Info($"[FRESH MENTION] {media_type} | {media_type.GetType()}");
+
+                    if (media_type == 1) // PHOTO
+                    {
+                        ctx.MediaUrl = await DownloadClass.Get_xma_image_download_link_by_id(mediaId);
+                        if (string.IsNullOrWhiteSpace(ctx.MediaUrl)) continue;
+
+                        ctx.MediaName = $"img_{Guid.NewGuid():N}.png";
+
+                        await _downloadSemaphore.WaitAsync();
+                        try
+                        {
+                            if (await DownloadClass.DownloadMedia(ctx.MediaUrl, ctx.MediaName))
+                            {
+                                ctx.FBPhotoID = await SendItemClass.UploadImage(ctx.MediaName);
+                                await SendItemClass.SendImage(ctx.FBPhotoID, threadId);
+                                // Mark as processed only after successful send
+                                Program.Store.UpsertMessage(mentionNotificationId, threadId, storyTimestamp, MessageStatus.Processed);
+                                Logger.Success($"Sent photo to @{username}");
+                            }
+                        }
+                        finally
+                        {
+                            _downloadSemaphore.Release();
+                            SafeDelete(ctx.MediaName);
+                        }
+                    }
+                    else if (media_type == 2) // VIDEO
+                    {
+                        Logger.Info($"[VIDEO]");
+                        ctx.MediaUrl = await DownloadClass.Get_xma_video_download_link_by_id(mediaId);
+                        if (string.IsNullOrWhiteSpace(ctx.MediaUrl)) continue;
+
+                        ctx.MediaName = $"vid_{Guid.NewGuid():N}.mp4";
+
+                        await _downloadSemaphore.WaitAsync();
+                        try
+                        {
+                            if (await DownloadClass.DownloadMedia(ctx.MediaUrl, ctx.MediaName))
+                            {
+                                ctx.FBVidID = await SendItemClass.UploadVideo(ctx.MediaName);
+                                await SendItemClass.SendVideo(ctx.FBVidID, threadId);
+                                Program.Store.UpsertMessage(mentionNotificationId, threadId, storyTimestamp, MessageStatus.Processed);
+                                Logger.Success($"Sent video to @{username}");
+                            }
+                        }
+                        finally
+                        {
+                            _downloadSemaphore.Release();
+                            SafeDelete(ctx.MediaName);
+                        }
+                    }
+                }
+            }
+            return "";
         }
 
         public static async Task<string> CheckDMAPI(string sessionId)
@@ -125,7 +200,6 @@ namespace IGMediaDownloaderV2
 
             // Process activation requests in parallel
             var tasks = new List<Task>();
-
             foreach (var thread in threads)
             {
                 var inviter = thread["inviter"];
@@ -134,7 +208,6 @@ namespace IGMediaDownloaderV2
                 var userId = inviter["pk"]?.ToString() ?? "";
                 var username = inviter["username"]?.ToString() ?? "";
                 var threadId = thread["thread_id"]?.ToString() ?? "";
-
                 var items = thread["items"] as JArray;
                 if (items == null) continue;
 
@@ -180,7 +253,25 @@ namespace IGMediaDownloaderV2
                 var threads = jsonObject.SelectToken("inbox")?["threads"] as JArray;
                 if (threads == null) return;
 
-                // Process threads in parallel with controlled concurrency
+                // 1. Collect mappings first (Synchronously - very fast)
+                var threadsToRegister = new List<(string, string)>();
+                foreach (var t in threads)
+                {
+                    var threadId = t["thread_id"]?.ToString();
+                    // Note: Instagram usually uses 'pk' or 'id' for the user ID
+                    var userId = t["inviter"]?["pk"]?.ToString() ?? t["inviter"]?["id"]?.ToString();
+
+                    if (!string.IsNullOrEmpty(threadId) && !string.IsNullOrEmpty(userId))
+                    {
+                        threadsToRegister.Add((threadId, userId));
+                    }
+                }
+
+                // 2. Register them in the DB immediately (uses your fast HashSet cache)
+                // This ensures GetThreadId(userId) will work for the ActivityFeed right away.
+                Program.Store.EnsureThreadsExist(threadsToRegister);
+
+                // 3. Now process the messages in the threads
                 var threadTasks = threads
                     .Where(t => t["inviter"] != null)
                     .Select(async thread =>
@@ -223,10 +314,10 @@ namespace IGMediaDownloaderV2
 
                 // One DB read per thread
                 long cutoff = Program.Store.GetCutoff(threadId);
-                
+
                 // Use app startup timestamp as minimum cutoff
                 long effectiveCutoff = Math.Max(cutoff, Program.AppStartupTimestamp);
-                
+
                 long nowSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                 long oldestProcessedThisRun = long.MaxValue;
 
@@ -606,10 +697,10 @@ namespace IGMediaDownloaderV2
             var ctx = new MediaContext();
             var xma = item["xma_media_share"] as JArray;
             if (xma == null || xma.Count == 0) return;
-            
-            string serialized_content_ref = Regex.Unescape(xma[0]["serialized_content_ref"]?.ToString()) ?? "";
-            
-            if (serialized_content_ref.Contains("/p/"))
+
+            string TargetUrl = Regex.Unescape(xma[0]["target_url"]?.ToString()) ?? "";
+            var media_type = await DownloadClass.Get_media_type(TargetUrl);
+            if (media_type == 1)
             {
                 ctx.MediaUrl = xma[0]?["preview_url"]?.ToString() ?? "";
                 ctx.MediaName = $"img_{Guid.NewGuid():N}.png";
@@ -633,11 +724,9 @@ namespace IGMediaDownloaderV2
                     Logger.Success($"Sent xma media to @{username}", indent: 2);
                 else
                     Logger.Warn($"Failed to send xma media to @{username}", indent: 2);
-            } 
-            else if (serialized_content_ref.Contains("reel_id"))
+            }
+            else if (media_type == 2)
             {
-                var TargetUrl = xma[0]["target_url"]?.ToString() ?? "";
-
                 ctx.MediaUrl = await DownloadClass.Get_xma_video_download_link(TargetUrl);
                 if (String.IsNullOrWhiteSpace(ctx.MediaUrl))
                 {
@@ -686,7 +775,7 @@ namespace IGMediaDownloaderV2
                 Logger.Warn($"Failed to get XMA Story Share (video) download link for @{username}", indent: 2);
                 return;
             }
-            
+
             if (MediaType == 1)
             {
                 ctx.MediaName = $"img_{Guid.NewGuid():N}.png";
@@ -710,7 +799,7 @@ namespace IGMediaDownloaderV2
                     Logger.Success($"Sent XMA Story Share (Image) to @{username}", indent: 2);
                 else
                     Logger.Warn($"Failed to send XMA Story Share (Image) to @{username}", indent: 2);
-            } 
+            }
             else
             {
                 ctx.MediaName = $"vid_{Guid.NewGuid():N}.mp4";
@@ -777,7 +866,7 @@ namespace IGMediaDownloaderV2
                 else
                     Logger.Warn($"Failed to send XMA Clip (Reel) to @{username}", indent: 2);
 
-            } 
+            }
             catch (Exception ex)
             {
                 Logger.Error($"HandleXmaClip error: {ex.Message}", indent: 2);
@@ -801,17 +890,17 @@ namespace IGMediaDownloaderV2
                 {
                     return;
                 }
-                
+
                 var cta_buttons = xma[0]["cta_buttons"] as JArray;
                 if (cta_buttons == null || cta_buttons.Count == 0) return;
-                
+
                 var TargetUrl = cta_buttons[1]["action_url"]?.ToString() ?? "";
                 if (String.IsNullOrWhiteSpace(TargetUrl))
                 {
                     Logger.Warn($"CTA button missing action_url for @{username}", indent: 2);
                     return;
                 }
-                
+
                 if (TargetUrl.Contains("reel"))
                 {
                     ctx.MediaUrl = await DownloadClass.Get_xma_video_download_link(TargetUrl);
@@ -841,7 +930,7 @@ namespace IGMediaDownloaderV2
                         Logger.Success($"Sent XMA Media Share (video) to @{username}", indent: 2);
                     else
                         Logger.Warn($"Failed to send XMA Media Share (video) to @{username}", indent: 2);
-                } 
+                }
                 else if (TargetUrl.Contains("/p/"))
                 {
                     ctx.MediaUrl = xma[0]?["preview_url"]?.ToString() ?? "";

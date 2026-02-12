@@ -14,15 +14,27 @@ namespace IGMediaDownloaderV2
     internal sealed class MessageStore
     {
         private readonly string _connectionString;
-
+        private readonly HashSet<string> _knownThreads = new HashSet<string>();
         public MessageStore(string dbPath = "processed_messages.db")
         {
-            dbPath = Environment.GetEnvironmentVariable("SQLITE_DB_PATH")
-             ?? "processed_messages.db";
-
+            dbPath = Environment.GetEnvironmentVariable("SQLITE_DB_PATH") ?? "processed_messages.db";
             _connectionString = $"Data Source={dbPath}";
 
             Init();
+            LoadThreadCache();
+        }
+
+        private void LoadThreadCache()
+        {
+            using var con = new SqliteConnection(_connectionString);
+            con.Open();
+            using var cmd = con.CreateCommand();
+            cmd.CommandText = "SELECT ThreadId FROM ThreadState;";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                _knownThreads.Add(reader.GetString(0));
+            }
         }
 
         private void Init()
@@ -52,6 +64,7 @@ ON Messages(ThreadId, Timestamp DESC);
 
 CREATE TABLE IF NOT EXISTS ThreadState (
     ThreadId TEXT PRIMARY KEY,
+    receiverId TEXT,
     CutoffTimestamp INTEGER NOT NULL
 );
 ";
@@ -71,6 +84,7 @@ CREATE TABLE IF NOT EXISTS ThreadState (
             return obj == null ? 0 : Convert.ToInt64(obj);
         }
 
+
         public void SetCutoff(string threadId, long cutoff)
         {
             using var con = new SqliteConnection(_connectionString);
@@ -78,13 +92,17 @@ CREATE TABLE IF NOT EXISTS ThreadState (
 
             using var cmd = con.CreateCommand();
             cmd.CommandText = @"
-INSERT INTO ThreadState (ThreadId, CutoffTimestamp)
-VALUES ($t, $c)
-ON CONFLICT(ThreadId) DO UPDATE SET CutoffTimestamp = excluded.CutoffTimestamp;
-";
+        INSERT INTO ThreadState (ThreadId, CutoffTimestamp)
+        VALUES ($t, $c)
+        ON CONFLICT(ThreadId) DO UPDATE SET 
+            CutoffTimestamp = excluded.CutoffTimestamp;
+    ";
             cmd.Parameters.AddWithValue("$t", threadId);
             cmd.Parameters.AddWithValue("$c", cutoff);
             cmd.ExecuteNonQuery();
+
+            // Sync the cache
+            _knownThreads.Add(threadId);
         }
 
         public bool Exists(string messageId)
@@ -163,6 +181,114 @@ WHERE MessageId IN (
 ";
 
             return cmd.ExecuteNonQuery(); // returns number of deleted rows
+        }
+
+        public void EnsureThreadExists(string threadId, string receiverId)
+        {
+            // 1. Check memory first - this is lightning fast
+            if (_knownThreads.Contains(threadId)) return;
+
+            // 2. Only if NOT in memory, hit the database
+            using var con = new SqliteConnection(_connectionString);
+            con.Open();
+            using var cmd = con.CreateCommand();
+            cmd.CommandText = "INSERT OR IGNORE INTO ThreadState (ThreadId, receiverId, CutoffTimestamp) VALUES ($t, $r, 0);";
+            cmd.Parameters.AddWithValue("$t", threadId);
+            cmd.Parameters.AddWithValue("$r", receiverId ?? (object)DBNull.Value);
+            cmd.ExecuteNonQuery();
+
+            // 3. Add to memory so we never hit the DB for this threadId again this session
+            _knownThreads.Add(threadId);
+        }
+
+        public void EnsureThreadsExist(IEnumerable<(string id, string receiver)> threads)
+        {
+            // 1. Filter the incoming list using the memory cache first
+            // This happens in RAM and is nearly instant
+            var newThreads = threads
+                .Where(t => !_knownThreads.Contains(t.id))
+                .DistinctBy(t => t.id) // Ensure no duplicates in the batch itself
+                .ToList();
+
+            // 2. If no truly 'new' threads, exit immediately without opening the DB
+            if (!newThreads.Any()) return;
+
+            // 3. Open connection and use a transaction for the remaining new threads
+            using var con = new SqliteConnection(_connectionString);
+            con.Open();
+            using var transaction = con.BeginTransaction();
+
+            try
+            {
+                using var cmd = con.CreateCommand();
+                cmd.Transaction = transaction;
+                cmd.CommandText = "INSERT OR IGNORE INTO ThreadState (ThreadId, receiverId, CutoffTimestamp) VALUES ($t, $r, 0);";
+
+                // Reuse parameters for better performance
+                var tParam = cmd.Parameters.Add("$t", SqliteType.Text);
+                var rParam = cmd.Parameters.Add("$r", SqliteType.Text);
+
+                foreach (var thread in newThreads)
+                {
+                    tParam.Value = thread.id;
+                    rParam.Value = thread.receiver ?? (object)DBNull.Value;
+                    cmd.ExecuteNonQuery();
+
+                    // 4. Update the cache after successful DB logic
+                    _knownThreads.Add(thread.id);
+                }
+
+                transaction.Commit();
+            }
+            catch
+            {
+                transaction.Rollback();
+            }
+        }
+
+        public string? GetReceiverId(string threadId)
+        {
+            Console.WriteLine($"[DEBUG] Entering GetReceiverId for {threadId}");
+            try
+            {
+                // Adding "Default Timeout" to the connection string helps prevent infinite hangs
+                using var con = new SqliteConnection(_connectionString + ";Default Timeout=5;");
+                con.Open();
+
+                using var cmd = con.CreateCommand();
+                cmd.CommandText = "SELECT receiverId FROM ThreadState WHERE ThreadId = $t LIMIT 1;";
+                cmd.Parameters.AddWithValue("$t", threadId);
+
+                Console.WriteLine("[DEBUG] Executing Scalar...");
+                object? obj = cmd.ExecuteScalar();
+
+                string? result = (obj == null || obj == DBNull.Value) ? null : obj.ToString();
+                Console.WriteLine($"[DEBUG] Return: {result ?? "NULL"}");
+                return result;
+            }
+            catch (SqliteException ex)
+            {
+                Console.WriteLine($"[SQL ERROR] {ex.SqliteErrorCode}: {ex.Message}");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[GENERAL ERROR] {ex.Message}");
+                return null;
+            }
+        }
+
+        public string? GetThreadId(string userId)
+        {
+            using var con = new SqliteConnection(_connectionString);
+            con.Open();
+
+            using var cmd = con.CreateCommand();
+            cmd.CommandText = "SELECT ThreadId FROM ThreadState WHERE receiverId = $t;";
+            cmd.Parameters.AddWithValue("$t", userId);
+
+            object? obj = cmd.ExecuteScalar();
+            return obj == DBNull.Value ? null : obj?.ToString();
         }
 
     }
