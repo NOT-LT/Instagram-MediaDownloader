@@ -27,21 +27,7 @@ namespace IGMediaDownloaderV2
                 {
                     Program.Authorization = HttpResponse.Headers.ToList()[0].Value.ToString();
                     var filePath = Environment.GetEnvironmentVariable("AUTH_STORE_PATH") ?? "Auth.txt";
-                    var filePath2 = Environment.GetEnvironmentVariable("SESSION_STORE_PATH") ?? "Session.txt";
-                    var sessionCookie = HttpResponse.Cookies
-                        .FirstOrDefault(c => c.Name == "sessionid");
-
-                    if (sessionCookie != null)
-                    {
-                        Program.SessionId = sessionCookie.Value;
-                    }
-                    else
-                    {
-                        Console.WriteLine("Session ID not found.");
-                        return false;
-                    }
                     await File.WriteAllTextAsync(filePath, Program.Authorization);
-                    await File.WriteAllTextAsync(filePath2, Program.SessionId);
                     return true;
                 }
                 else
@@ -51,15 +37,12 @@ namespace IGMediaDownloaderV2
             }
             catch (Exception ex)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("An error occurred during the login process.");
-                Console.WriteLine($"Error: {ex.Message}");
-                Console.ResetColor();
+                Logger.Error($"An error occurred during the login process., Error Message: {ex.Message}");
                 return false;
             }
         }
 
-        public async static Task<bool> IsValidTokens(string bearerToken, string sessionId)
+        public async static Task<bool> IsValidAuthToken(string bearerToken)
         {
             var data = "surface=feed&user_id=193919249&_uuid=d152e68d-6663-41e9-bddd-a7ea9d7e7a02&bk_client_context={\"bloks_version\":\"8dab28e76d3286a104a7f1c9e0c632386603a488cf584c9b49161c2f5182fe07\",\"styles_id\":\"instagram\"}&bloks_versioning_id=8dab28e76d3286a104a7f1c9e0c632386603a488cf584c9b49161c2f5182fe07";
             const string url = "https://i.instagram.com/api/v1/clips/discover/stream/";
@@ -72,17 +55,14 @@ namespace IGMediaDownloaderV2
                 request.AddHeader("X-Ig-App-Id", "567067343352427");
                 request.AddParameter("application/x-www-form-urlencoded", data, ParameterType.RequestBody);
 
-                authAction(request); // Apply specific auth (Bearer or Cookie)
+                authAction(request);
 
                 var response = await Program.IGRestClient.ExecuteAsync(request);
                 return response.IsSuccessStatusCode;
             }
 
-            // Execute both checks
             bool bearerValid = await CheckStatus(r => r.AddHeader("Authorization", bearerToken));
-            bool sessionValid = await CheckStatus(r => r.AddCookie("sessionid", sessionId, "/", "i.instagram.com"));
-            Console.WriteLine($"Bearer Token Valid: {bearerValid}, Session ID Valid: {sessionValid}");
-            return bearerValid && sessionValid;
+            return bearerValid;
         }
 
 

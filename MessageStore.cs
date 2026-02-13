@@ -40,12 +40,12 @@ namespace IGMediaDownloaderV2
             }
             catch (SqliteException ex)
             {
-                Console.WriteLine($"[SQL ERROR] {methodName} ({ex.SqliteErrorCode}): {ex.Message}");
+                Logger.Error($"SQL ERROR: {methodName} ({ex.SqliteErrorCode}): {ex.Message}");
                 return default;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[GENERAL ERROR] {methodName}: {ex.Message}");
+                Logger.Error($"GENERAL ERROR: {methodName}: {ex.Message}");
                 return default;
             }
         }
@@ -53,8 +53,8 @@ namespace IGMediaDownloaderV2
         private void ExecuteSafe(Action action, string methodName)
         {
             try { action(); }
-            catch (SqliteException ex) { Console.WriteLine($"[SQL ERROR] {methodName} ({ex.SqliteErrorCode}): {ex.Message}"); }
-            catch (Exception ex) { Console.WriteLine($"[GENERAL ERROR] {methodName}: {ex.Message}"); }
+            catch (SqliteException ex) { Logger.Error($"SQL ERROR: {methodName} ({ex.SqliteErrorCode}): {ex.Message}"); }
+            catch (Exception ex) { Logger.Error($"GENERAL ERROR: {methodName}: {ex.Message}"); }
         }
         #endregion
 
