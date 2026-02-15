@@ -93,7 +93,7 @@ namespace IGMediaDownloaderV2
                 return false;
         }
 
-        public static async Task<bool> SendText(string userId, string username, string threadId, string MsgText)
+        public static async Task<bool> SendText(string userId, string MsgText)
         {
             var clientContext = Convert.ToString(Random.Shared.Next(999999999));
             var request = new RestRequest("https://i.instagram.com/api/v1/direct_v2/threads/broadcast/text/");

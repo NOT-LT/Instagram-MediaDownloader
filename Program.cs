@@ -18,9 +18,8 @@ namespace IGMediaDownloaderV2
         internal static MessageStore Store = new MessageStore("processed_messages.db");
         public static RestClient IGRestClient = new RestClient("https://i.instagram.com/");
         public static RestClient FBRestClient = new RestClient("https://rupload.facebook.com/");
-        public static string Username = "", Password = "", Authorization = "", SessionId = "";
+        public static string Username = "", Password = "", Authorization = "";
         public static int GoodReqs = 0, BadReqs = 0, ProcessedMsgs = 0;
-        public static List<string> Timestamps = new List<string>();
         public const string IgUserAgent = "Instagram 361.0.0.46.88 Android (31/12; 640dpi; 1644x3840; 674675155)";
         public const string IgAppId = "567067343352427";
         public static readonly long PollMentionDelayMS =
@@ -34,6 +33,9 @@ namespace IGMediaDownloaderV2
         // App startup timestamp in microseconds (Instagram format)
         public static long AppStartupTimestamp { get; private set; }
 
+        private static int _lastCleanupCount = 0;
+        private static DateTime _lastCleanupTime = DateTime.MinValue;
+
         static void Main(string[] args)
         {
             // Capture app startup timestamp immediately (in microseconds)
@@ -43,12 +45,10 @@ namespace IGMediaDownloaderV2
             {
                 DotNetEnv.Env.Load();
                 var filePath = Environment.GetEnvironmentVariable("AUTH_STORE_PATH") ?? "Auth.txt";
-                var filePath2 = Environment.GetEnvironmentVariable("SESSION_STORE_PATH") ?? "Session.txt";
 
-                if (File.Exists(filePath) && File.Exists(filePath2))
+                if (File.Exists(filePath))
                 {
                     Program.Authorization = File.ReadAllText(filePath); // Read saved Authorization token
-                    Program.SessionId = File.ReadAllText(filePath2); // Read saved SessionId
                 }
             }
             catch (Exception ex)
@@ -64,7 +64,7 @@ namespace IGMediaDownloaderV2
 
         public static async Task MainAsync()
         {
-            if (Program.Authorization.Length < 10 || Program.SessionId.Length < 10 || await LoginClass.IsValidTokens(Program.Authorization, Program.SessionId) == false)
+            if (Program.Authorization.Length < 10 || await LoginClass.IsValidAuthToken(Program.Authorization) == false)
             {
                 Username = Environment.GetEnvironmentVariable("USERNAME") ?? "";
                 Password = Environment.GetEnvironmentVariable("PASSWORD") ?? "";
@@ -81,20 +81,23 @@ namespace IGMediaDownloaderV2
             IGRestClient.AddDefaultHeader("Authorization", Authorization);
             FBRestClient.AddDefaultHeader("Authorization", Authorization);
 
-
-            var DMReqsThrd = new Thread(DMReqs) { Priority = ThreadPriority.AboveNormal };
+            // Start background threads
+            var DMReqsThrd = new Thread(DMReqs) { Priority = ThreadPriority.AboveNormal, Name = "DM Requests Thread" };
             DMReqsThrd.Start();
-            var CounterThrd = new Thread(Counter) { Priority = ThreadPriority.AboveNormal };
+            
+            var ActivityFeedThrd = new Thread(ActivityFeedLoop) { Priority = ThreadPriority.AboveNormal, Name = "Activity Feed Thread" };
+            ActivityFeedThrd.Start();
+            
+            var CounterThrd = new Thread(Counter) { Priority = ThreadPriority.Normal, Name = "Counter Thread" };
             CounterThrd.Start();
 
-
+            // Main thread handles direct messages
             var DMResponse = "";
             while (true)
             {
-
                 try
                 {
-                    DMResponse = await DMClass.CheckDMAPI(Authorization);
+                    DMResponse = await InstagramApiClient.GetDirectMessagesAsync();
                     if (DMResponse.Contains(@"""status"":""ok"""))
                     {
                         Logger.Info($"[{Program.GoodReqs}] Direct messages checked at {DateTime.Now.ToString("HH:mm:ss")}");
@@ -110,37 +113,13 @@ namespace IGMediaDownloaderV2
                                                         out var failValue)
                                                         ? failValue
                                                         : 180_000; // default 180 seconds
-
-                    }
-
-                }
-                catch { }
-
-                try
-                {
-                    string JSONResponse = await DMClass.CheckActivityFeedAPI();
-                    if (JSONResponse.Contains(@"""status"":""ok"""))
-                    {
-                        Logger.Info($"[{Program.GoodReqs}] Activity Feeds (mentions) checked at {DateTime.Now.ToString("HH:mm:ss")}");
-                        GoodReqs++;
-                        await DMClass.ActivityFeedProcess(JSONResponse);
-                    }
-                    else
-                    {
-                        Logger.Warn($" Activity Feeds (mentions) check failed at {DateTime.Now.ToString("HH:mm:ss")}");
-                        BadReqs++;
-                        int FAILdelayMs = int.TryParse(
-                                                        Environment.GetEnvironmentVariable("FAIL_POLL_MSGS_DELAY_MS"),
-                                                        out var failValue)
-                                                        ? failValue
-                                                        : 180_000; // default 180 seconds
-
                         Thread.Sleep(FAILdelayMs);
                     }
-
                 }
-                catch { }
-
+                catch (Exception ex)
+                {
+                    Logger.Error($"Error in main DM loop: {ex.Message}");
+                }
 
                 int delayMs = int.TryParse(
                                             Environment.GetEnvironmentVariable("POLL_MSGS_DELAY_MS"),
@@ -149,21 +128,16 @@ namespace IGMediaDownloaderV2
                                             : 30_000; // default 30 seconds
 
                 Thread.Sleep(delayMs);
-
             }
-
-
         }
 
         public static async void DMReqs()
         {
-            var DMReqsResponse = "";
             while (true)
             {
                 try
                 {
-
-                    DMReqsResponse = await DMClass.CheckDMReqAPI(Authorization);
+                    var DMReqsResponse = await InstagramApiClient.GetPendingDMInboxAsync();
                     
                     if (DMReqsResponse.Contains(@"""status"":""ok"""))
                     {
@@ -180,11 +154,14 @@ namespace IGMediaDownloaderV2
                                                        out var failValue)
                                                        ? failValue
                                                        : 180_000; // default 180 seconds
-
                         Thread.Sleep(FAILdelayMs);
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Logger.Error($"Error in DM Requests loop: {ex.Message}");
+                }
+                
                 int delayMs = int.TryParse(
                                           Environment.GetEnvironmentVariable("POLL_REQS_DELAY_MS"),
                                           out var value)
@@ -195,6 +172,50 @@ namespace IGMediaDownloaderV2
             }
         }
 
+        public static async void ActivityFeedLoop()
+        {
+            // Small delay to let DM processing establish thread mappings first
+            Thread.Sleep(5000);
+            Logger.Info("Activity Feed monitor started");
+
+            while (true)
+            {
+                try
+                {
+                    var activityFeedResponse = await InstagramApiClient.GetActivityFeedAsync();
+                    
+                    if (activityFeedResponse.Contains(@"""status"":""ok"""))
+                    {
+                        Logger.Info($"[{Program.GoodReqs}] Activity Feed (mentions) checked at {DateTime.Now.ToString("HH:mm:ss")}");
+                        GoodReqs++;
+                        await DMClass.ActivityFeedProcess(activityFeedResponse);
+                    }
+                    else
+                    {
+                        Logger.Warn($"Activity Feed check failed at {DateTime.Now.ToString("HH:mm:ss")}");
+                        BadReqs++;
+                        int FAILdelayMs = int.TryParse(
+                                                        Environment.GetEnvironmentVariable("FAIL_POLL_MENTIONS_DELAY_MS"),
+                                                        out var failValue)
+                                                        ? failValue
+                                                        : 180_000; // default 180 seconds
+                        Thread.Sleep(FAILdelayMs);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"Error in Activity Feed loop: {ex.Message}");
+                }
+
+                int delayMs = int.TryParse(
+                                            Environment.GetEnvironmentVariable("POLL_MENTIONS_DELAY_MS"),
+                                            out var value)
+                                            ? value
+                                            : 60_000; // default 60 seconds (mentions don't need to be as frequent)
+
+                Thread.Sleep(delayMs);
+            }
+        }
 
         public static void Counter()
         {
@@ -203,15 +224,32 @@ namespace IGMediaDownloaderV2
                 try
                 {
                     Console.Title = $"Good Requests: {GoodReqs}  || Bad Requests: {BadReqs} || Processed Msgs: {ProcessedMsgs}";
-                    if (ProcessedMsgs % 100 == 0) // Every 100 processed messages
+                    
+                    int currentCount = ProcessedMsgs;
+                    var now = DateTime.UtcNow;
+                    
+                    // Cleanup strategy: Either 100 messages OR 5 minutes (whichever comes first)
+                    bool countThresholdReached = currentCount >= _lastCleanupCount + 100;
+                    bool timeThresholdReached = (now - _lastCleanupTime).TotalMinutes >= 5;
+                    
+                    if (currentCount > 0 && (countThresholdReached || timeThresholdReached))
                     {
-                        Store.DeleteUntilCutoff();
+                        _lastCleanupCount = currentCount;
+                        _lastCleanupTime = now;
+                        
+                        int deletedRows = Store.DeleteUntilCutoff();
+                        if (deletedRows > 0)
+                        {
+                            Logger.Info($"Cleanup: Deleted {deletedRows} old message(s) from database");
+                        }
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Logger.Error($"Error in Counter: {ex.Message}");
+                }
                 Thread.Sleep(500);
             }
         }
-
     }
 }
