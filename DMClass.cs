@@ -93,15 +93,17 @@ namespace IGMediaDownloaderV2
                         string username = args["profile_name"]?.ToString() ?? "unknown";
                         string userId = args["profile_id"]?.ToString() ?? "";
                         string mediaId = args["media"]?[0]?["id"]?.ToString() ?? "";
+                        string mentionNotificationId = $"M_{mediaId}_{storyTimestamp}";
+                        var threadId = Program.Store.GetThreadId(userId);
 
                         if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(mediaId))
                         {
                             Logger.Warn($"Missing userId or mediaId for mention from @{username}");
+                            await Program.Store.UpsertMessageAsync(mentionNotificationId, threadId ?? "", storyTimestamp, MessageStatus.Failed);
                             continue; // Skip this mention but continue processing others
                         }
 
                         // 'M_' prefix to distinguish from DM item IDs
-                        string mentionNotificationId = $"M_{mediaId}_{storyTimestamp}";
 
                         // 2. Duplicate Check - continue to next mention
                         if (Program.Store.Exists(mentionNotificationId))
@@ -113,16 +115,16 @@ namespace IGMediaDownloaderV2
                         Logger.Info($"FRESH MENTION from @{username}, Media ID: {mediaId}, UserId: {userId}");
 
                         // 3. Thread ID Resolution
-                        var threadId = Program.Store.GetThreadId(userId);
 
                         if (string.IsNullOrEmpty(threadId))
                         {
                             Logger.Warn($"No thread found for @{username} (userId: {userId}). They may need to DM the bot first.");
+                            await Program.Store.UpsertMessageAsync(mentionNotificationId, threadId ?? "", storyTimestamp, MessageStatus.Failed);
                             continue; // Skip this mention but continue processing others
                         }
 
                         // Mark as New (not Processed yet)
-                        Program.Store.UpsertMessage(mentionNotificationId, threadId, storyTimestamp, MessageStatus.New);
+                        await Program.Store.UpsertMessageAsync(mentionNotificationId, threadId, storyTimestamp, MessageStatus.New);
 
                         // Process mention in parallel with concurrency control
                         var mentionTask = Task.Run(async () =>
@@ -134,20 +136,20 @@ namespace IGMediaDownloaderV2
 
                                 if (success)
                                 {
-                                    Program.Store.UpsertMessage(mentionNotificationId, threadId, storyTimestamp, MessageStatus.Processed);
+                                    await Program.Store.UpsertMessageAsync(mentionNotificationId, threadId, storyTimestamp, MessageStatus.Processed);
                                     Interlocked.Increment(ref Program.ProcessedMsgs);
                                     Logger.Success($"Processed a mention download from @{username}");
                                 }
                                 else
                                 {
-                                    Program.Store.UpsertMessage(mentionNotificationId, threadId, storyTimestamp, MessageStatus.Failed);
+                                    await Program.Store.UpsertMessageAsync(mentionNotificationId, threadId, storyTimestamp, MessageStatus.Failed);
                                     Logger.Error($"Failed to process mention from @{username}");
                                 }
                             }
                             catch (Exception ex)
                             {
                                 Logger.Error($"Error processing mention from @{username}: {ex.Message}");
-                                Program.Store.UpsertMessage(mentionNotificationId, threadId, storyTimestamp, MessageStatus.Failed);
+                                await Program.Store.UpsertMessageAsync(mentionNotificationId, threadId, storyTimestamp, MessageStatus.Failed);
                             }
                             finally
                             {
@@ -165,13 +167,16 @@ namespace IGMediaDownloaderV2
                     }
                 }
 
-                // Wait for all mention processing tasks to complete
-                if (mentionTasks.Any())
-                {
-                    Logger.Info($"Queued {processedCount} mention(s) for parallel processing");
-                    await Task.WhenAll(mentionTasks).ConfigureAwait(false);
-                    Logger.Success($"Completed processing {processedCount} mention(s)");
-                }
+                //if (mentionTasks.Any())
+                //{
+                //    Logger.Info($"Queued {processedCount} mention(s)");
+
+                //    Task.WhenAll(mentionTasks).ContinueWith(_ =>
+                //    {
+                //        Logger.Success($"Completed processing {processedCount} mention(s)");
+                //    });
+                //}
+
 
                 return "";
             }
@@ -251,7 +256,7 @@ namespace IGMediaDownloaderV2
 
                 // process the messages in the threads
                 var threadTasks = threads
-                    .Where(t => t["inviter"] != null)
+                    .Where(t => t["users"] != null)
                     .Select(async thread =>
                     {
                         await _threadSemaphore.WaitAsync();
@@ -277,16 +282,16 @@ namespace IGMediaDownloaderV2
         {
             try
             {
-                var inviter = thread["inviter"];
-                string username = inviter?["username"]?.ToString() ?? "";
                 string threadId = thread["thread_id"]?.ToString() ?? "";
+                var user = thread?["users"]?[0] ?? "";
+                string username = user?["username"]?.ToString() ?? "";
 
                 Logger.Info($"Processing thread {threadId} from @{username}");
 
                 var items = thread["items"] as JArray;
                 if (items == null || items.Count == 0)
                 {
-                    Logger.Debug("No items", indent: 1);
+                    Logger.Warn("No items", indent: 1);
                     return;
                 }
 
@@ -301,6 +306,8 @@ namespace IGMediaDownloaderV2
 
                 // Process messages in parallel with controlled concurrency
                 var messageTasks = new List<Task>();
+
+                await Program.Store.EnsureThreadExistsAndAddAsync(threadId, user?["id"]?.ToString() ?? "");
 
                 foreach (var item in items)
                 {
@@ -342,7 +349,7 @@ namespace IGMediaDownloaderV2
                     }
 
                     // Mark as new
-                    Program.Store.UpsertMessage(messageId, threadId, ts, MessageStatus.New);
+                    await Program.Store.UpsertMessageAsync(messageId, threadId, ts, MessageStatus.New);
                     Interlocked.Increment(ref Program.ProcessedMsgs);
 
                     // Process message in parallel
@@ -367,7 +374,7 @@ namespace IGMediaDownloaderV2
 
                 if (finalCutoff != 0)
                 {
-                    Program.Store.SetCutoff(threadId, finalCutoff);
+                    await Program.Store.SetCutoffAsync(threadId, finalCutoff);
                     Logger.Debug($"Cutoff updated to {finalCutoff} (appStart={Program.AppStartupTimestamp})", indent: 1);
                 }
             }
@@ -433,18 +440,17 @@ namespace IGMediaDownloaderV2
                         break;
 
                     default:
-                        Logger.Warn($"Unhandled type: {itemType}", indent: 1);
                         break;
                 }
             }
             catch (Exception ex)
             {
                 Logger.Error($"Processing failed: {ex.Message}", indent: 1);
-                Program.Store.UpsertMessage(messageId, threadId, ts, MessageStatus.Failed);
+                await Program.Store.UpsertMessageAsync(messageId, threadId, ts, MessageStatus.Failed);
             }
             finally
             {
-                Program.Store.UpsertMessage(messageId, threadId, ts, MessageStatus.Processed);
+                await Program.Store.UpsertMessageAsync(messageId, threadId, ts, MessageStatus.Processed);
                 _messageSemaphore.Release();
             }
         }
@@ -949,8 +955,13 @@ namespace IGMediaDownloaderV2
                 }
                 else if (mediaType == 8) // CAROUSEL
                 {
-                    Logger.Warn($"Carousel media type is not supported in PipelineMediaById for @{username}", indent: 2);
-                    return false;
+                    var carouselItems = MediaParser.ExtractCarouselChildMediaIds(MediaInfoJObject);
+                    Logger.Debug("carouselItems ids: " + String.Join(",",carouselItems));
+                    foreach (var childMediaId in carouselItems)
+                    {
+                        _ = PipelineMediaById(childMediaId, threadId, username);
+                    }
+                    return true;
                 }
                 else
                 {

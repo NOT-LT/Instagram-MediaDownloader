@@ -19,6 +19,7 @@ namespace IGMediaDownloaderV2
         private readonly string _connectionString;
         // Use ConcurrentDictionary for thread-safe access without manual locks
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _knownThreads = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>();
+        private readonly SemaphoreSlim _writeLock = new SemaphoreSlim(1, 1);
 
         // For a thread safe HashSet, we use ConcurrentDictionary with dummy bytes to represent presence
         public MessageStore(string dbPath = "processed_messages.db")
@@ -127,27 +128,33 @@ CREATE TABLE IF NOT EXISTS ThreadState (
             }, nameof(GetCutoff));
         }
 
-        public void SetCutoff(string threadId, long cutoff)
+        public async Task SetCutoffAsync(string threadId, long cutoff)
         {
-            ExecuteSafe(() =>
+            await _writeLock.WaitAsync();
+            try
             {
-                using var con = new SqliteConnection(_connectionString);
-                con.Open();
+                ExecuteSafe(() =>
+                {
+                    using var con = new SqliteConnection(_connectionString);
+                    con.Open();
 
-                using var cmd = con.CreateCommand();
-                cmd.CommandText = @"
-        INSERT INTO ThreadState (ThreadId, CutoffTimestamp)
-        VALUES ($t, $c)
-        ON CONFLICT(ThreadId) DO UPDATE SET 
-            CutoffTimestamp = excluded.CutoffTimestamp;
-    ";
-                cmd.Parameters.AddWithValue("$t", threadId);
-                cmd.Parameters.AddWithValue("$c", cutoff);
-                cmd.ExecuteNonQuery();
+                    using var cmd = con.CreateCommand();
+                    cmd.CommandText = @"
+INSERT INTO ThreadState (ThreadId, CutoffTimestamp)
+VALUES ($t,$c)
+ON CONFLICT(ThreadId) DO UPDATE SET CutoffTimestamp = excluded.CutoffTimestamp;
+";
+                    cmd.Parameters.AddWithValue("$t", threadId);
+                    cmd.Parameters.AddWithValue("$c", cutoff);
+                    cmd.ExecuteNonQuery();
 
-                // Sync the cache
-                _knownThreads.TryAdd(threadId, 0);
-            }, nameof(SetCutoff));
+                    _knownThreads.TryAdd(threadId, 0);
+                }, nameof(SetCutoffAsync));
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
         }
 
         public bool Exists(string messageId)
@@ -190,15 +197,18 @@ CREATE TABLE IF NOT EXISTS ThreadState (
             return status == MessageStatus.Processed || status == MessageStatus.Skipped;
         }
 
-        public void UpsertMessage(string messageId, string threadId, long timestamp, MessageStatus status)
+        public async Task UpsertMessageAsync(string messageId, string threadId, long timestamp, MessageStatus status)
         {
-            ExecuteSafe(() =>
+            await _writeLock.WaitAsync();
+            try
             {
-                using var con = new SqliteConnection(_connectionString);
-                con.Open();
+                ExecuteSafe(() =>
+                {
+                    using var con = new SqliteConnection(_connectionString);
+                    con.Open();
 
-                using var cmd = con.CreateCommand();
-                cmd.CommandText = @"
+                    using var cmd = con.CreateCommand();
+                    cmd.CommandText = @"
 INSERT INTO Messages (MessageId, ThreadId, Timestamp, Status, UpdatedAtUtc)
 VALUES ($id, $t, $ts, $s, $u)
 ON CONFLICT(MessageId) DO UPDATE SET
@@ -207,15 +217,22 @@ ON CONFLICT(MessageId) DO UPDATE SET
     Status = excluded.Status,
     UpdatedAtUtc = excluded.UpdatedAtUtc;
 ";
-                cmd.Parameters.AddWithValue("$id", messageId);
-                cmd.Parameters.AddWithValue("$t", threadId);
-                cmd.Parameters.AddWithValue("$ts", timestamp);
-                cmd.Parameters.AddWithValue("$s", (int)status);
-                cmd.Parameters.AddWithValue("$u", DateTime.UtcNow.ToString("o"));
 
-                cmd.ExecuteNonQuery();
-            }, nameof(UpsertMessage));
+                    cmd.Parameters.AddWithValue("$id", messageId);
+                    cmd.Parameters.AddWithValue("$t", threadId);
+                    cmd.Parameters.AddWithValue("$ts", timestamp);
+                    cmd.Parameters.AddWithValue("$s", (int)status);
+                    cmd.Parameters.AddWithValue("$u", DateTime.UtcNow.ToString("o"));
+
+                    cmd.ExecuteNonQuery();
+                }, nameof(UpsertMessageAsync));
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
         }
+
 
         public int DeleteUntilCutoff()
         {
@@ -239,74 +256,35 @@ WHERE MessageId IN (
             }, nameof(DeleteUntilCutoff));
         }
 
-        public void EnsureThreadExists(string threadId, string receiverId)
+        public async Task EnsureThreadExistsAndAddAsync(string threadId, string receiverId)
         {
-            // 1. Check memory first - this is lightning fast
-            if (_knownThreads.ContainsKey(threadId)) return;
+            if (_knownThreads.ContainsKey(threadId))
+                return;
 
-            ExecuteSafe(() =>
+            await _writeLock.WaitAsync();
+            try
             {
-                // 2. Only if NOT in memory, hit the database
-                using var con = new SqliteConnection(_connectionString);
-                con.Open();
-                using var cmd = con.CreateCommand();
-                cmd.CommandText = "INSERT OR IGNORE INTO ThreadState (ThreadId, ReceiverId, CutoffTimestamp) VALUES ($t, $r, 0);";
-                cmd.Parameters.AddWithValue("$t", threadId);
-                cmd.Parameters.AddWithValue("$r", receiverId ?? (object)DBNull.Value);
-                cmd.ExecuteNonQuery();
-
-                // 3. Add to memory so we never hit the DB for this threadId again this session
-                _knownThreads.TryAdd(threadId, 0);
-            }, nameof(EnsureThreadExists));
-        }
-
-        public void EnsureThreadsExist(IEnumerable<(string id, string receiver)> threads)
-        {
-            // 1. Filter the incoming list using the memory cache first
-            // This happens in RAM and is nearly instant
-            var newThreads = threads
-                .Where(t => !_knownThreads.ContainsKey(t.id))
-                .DistinctBy(t => t.id) // Ensure no duplicates in the batch itself
-                .ToList();
-
-            // 2. If no truly 'new' threads, exit immediately without opening the DB
-            if (!newThreads.Any()) return;
-
-            ExecuteSafe(() =>
-            {
-                // 3. Open connection and use a transaction for the remaining new threads
-                using var con = new SqliteConnection(_connectionString);
-                con.Open();
-                using var transaction = con.BeginTransaction();
-
-                try
+                ExecuteSafe(() =>
                 {
+                    using var con = new SqliteConnection(_connectionString);
+                    con.Open();
+
                     using var cmd = con.CreateCommand();
-                    cmd.Transaction = transaction;
-                    cmd.CommandText = "INSERT OR IGNORE INTO ThreadState (ThreadId, ReceiverId, CutoffTimestamp) VALUES ($t, $r, 0);";
+                    cmd.CommandText =
+                        "INSERT OR IGNORE INTO ThreadState (ThreadId, ReceiverId, CutoffTimestamp) VALUES ($t,$r,0);";
 
-                    // Reuse parameters for better performance
-                    var tParam = cmd.Parameters.Add("$t", SqliteType.Text);
-                    var rParam = cmd.Parameters.Add("$r", SqliteType.Text);
+                    cmd.Parameters.AddWithValue("$t", threadId);
+                    cmd.Parameters.AddWithValue("$r", receiverId ?? (object)DBNull.Value);
+                    cmd.ExecuteNonQuery();
 
-                    foreach (var thread in newThreads)
-                    {
-                        tParam.Value = thread.id;
-                        rParam.Value = thread.receiver ?? (object)DBNull.Value;
-                        cmd.ExecuteNonQuery();
-
-                        // 4. Update the cache after successful DB logic
-                        _knownThreads.TryAdd(thread.id, 0);
-                    }
-
-                    transaction.Commit();
-                }
-                catch
-                {
-                    transaction.Rollback();
-                    throw; // Re-throw to be caught by ExecuteSafe
-                }
-            }, nameof(EnsureThreadsExist));
+                    _knownThreads.TryAdd(threadId, 0);
+                    Logger.Info($"Added {receiverId} to thread {threadId}");
+                }, nameof(EnsureThreadExistsAndAddAsync));
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
         }
 
         public string? GetReceiverId(string threadId)
@@ -363,6 +341,23 @@ WHERE MessageId IN (
                 cmd.ExecuteNonQuery();
                 _knownThreads.TryAdd(threadId, 0);
             }, nameof(RegisterThread));
+        }
+
+        public int DeleteOlderThanOneHour()
+        {
+            return ExecuteSafe(() =>
+            {
+                using var con = new SqliteConnection(_connectionString);
+                con.Open();
+
+                using var cmd = con.CreateCommand();
+                cmd.CommandText = @"
+DELETE FROM Messages
+WHERE datetime(UpdatedAtUtc) <= datetime('now', '-1 hour');
+";
+
+                return cmd.ExecuteNonQuery();
+            }, nameof(DeleteOlderThanOneHour));
         }
     }
 }

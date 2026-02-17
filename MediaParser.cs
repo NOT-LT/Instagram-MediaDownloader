@@ -91,6 +91,28 @@ namespace IGMediaDownloaderV2
             var mediaType = JObject.Parse(JSONResponse)?["items"]?[0]?["media_type"]?.ToString() ?? "-1";
 
             return int.Parse(mediaType);
-        } 
+        }
+
+
+        public static string[] ExtractCarouselChildMediaIds(JObject MediaInfoJSONResponse)
+        {
+            try
+            {
+                var carouselChildId = MediaInfoJSONResponse["items"]?[0]?["carousel_media_ids"] as JArray;
+
+                if (carouselChildId != null)
+                {
+                    // Convert to string array
+                    string[] carouselIds = carouselChildId.Select(id => id.ToString()).ToArray();
+                    return carouselIds;
+
+                }
+                return [];
+            }
+            catch
+            {
+                return [];
+            }
+        }
     }
 }
